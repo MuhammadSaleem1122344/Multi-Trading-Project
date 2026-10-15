@@ -1,0 +1,13 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+sqlalchemy==2.0.43
+pydantic-settings==2.10.1
+python-dotenv==1.1.1
+yfinance==0.2.65
+pandas==2.3.2
+numpy==2.3.2
+httpx==0.28.1
+PyJWT==2.10.1
+passlib[bcrypt]==1.7.4
+bcrypt==4.3.0
+openai==1.107.0
