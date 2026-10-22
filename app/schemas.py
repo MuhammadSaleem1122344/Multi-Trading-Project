@@ -78,6 +78,13 @@ class ORMModel(BaseModel):
 # ------------------------------------------------------------------- requests
 class AnalysisRequest(ORMModel):
     symbol: str
+    market: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "Optional market data used by the analysis agents. When omitted, the latest "
+            "ticker is fetched for the symbol."
+        ),
+    )
     capital: float = Field(100_000, gt=0, le=1e9)
     risk_per_trade: float | None = Field(None, gt=0, le=0.10,
                                          description="Fraction of capital. None = the AI decides")
@@ -85,6 +92,20 @@ class AnalysisRequest(ORMModel):
     asset_type: AssetType | None = None
 
     _sym = field_validator("symbol")(_clean_symbol)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_market_symbol(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or not isinstance(data.get("market"), str):
+            return data
+
+        market_symbol = _clean_symbol(data["market"])
+        symbol = data.get("symbol")
+        if symbol is not None and (
+            not isinstance(symbol, str) or _clean_symbol(symbol) != market_symbol
+        ):
+            raise ValueError("market symbol must match the top-level symbol")
+        return {**data, "symbol": market_symbol, "market": None}
 
 
 class OrderRequest(ORMModel):

@@ -42,3 +42,24 @@ def get_live_watchlist():
         "timestamp": exchange.milliseconds(),
         "datetime": exchange.iso8601(exchange.milliseconds()),
     }
+
+
+def get_crypto_prices():
+    return get_live_watchlist()
+
+
+def get_market_data(symbol: str) -> dict:
+    ticker = exchange.fetch_ticker(symbol)
+    price = ticker.get("last")
+    if price is None or price <= 0:
+        raise ValueError(f"No valid market price is available for {symbol}")
+    return {
+        "symbol": symbol,
+        "asset_type": "crypto",
+        "price": price,
+        "change_pct": ticker.get("percentage"),
+        "volume": ticker.get("baseVolume"),
+        "high_24h": ticker.get("high"),
+        "low_24h": ticker.get("low"),
+        "timestamp": ticker.get("timestamp"),
+    }

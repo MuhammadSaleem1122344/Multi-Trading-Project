@@ -11,6 +11,7 @@ plug any API (NewsAPI, Finnhub, Alpha Vantage, SEC, OpenAI, Claude, ...).
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 import re
@@ -225,7 +226,11 @@ class ResearchAgent:
 
     def analyze(self, market: dict) -> dict:
         symbol = str(market.get("symbol", "UNKNOWN"))
-        cached = self._cache.get(symbol)
+        market_fingerprint = hashlib.sha256(
+            json.dumps(market, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        cache_key = f"{symbol}:{market_fingerprint}"
+        cached = self._cache.get(cache_key)
         if cached and time.time() - cached[0] < self.cache_ttl_s:
             return cached[1]
 
@@ -261,7 +266,7 @@ class ResearchAgent:
                            for s in signals},
             "sources_used": [s.name for s in signals],
         }
-        self._cache[symbol] = (time.time(), result)
+        self._cache[cache_key] = (time.time(), result)
         return result
 
     def _collect(self, symbol: str, market: dict) -> list[Signal]:

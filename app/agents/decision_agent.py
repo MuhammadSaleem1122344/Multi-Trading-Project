@@ -1,16 +1,4 @@
-"""Advanced Decision Orchestrator Agent (long-only / spot trading).
 
-Inputs : technical, research and risk agent outputs (+ optional current position)
-Output : action (BUY / SELL / HOLD), intent (what to do with the position),
-         quantity, position size, stop-loss, take-profit, confidence, reasoning.
-
-Highlights
-- Regime-aware weights (trending / sideways / volatile markets)
-- Confidence-weighted score, conflict penalty, risk multiplier
-- Hysteresis (no BUY/SELL flip-flopping), risk veto, low-confidence downgrade
-- Position aware: never double-buys, ignores SELL when flat, exits when long
-- Uses the Risk agent's quantity and ATR stop/target when available
-"""
 from __future__ import annotations
 
 import logging

@@ -16,7 +16,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ..models import CashTransaction,  Order, Portfolio, Position, Trade
+from ..models import CashTransaction, EquitySnapshot, Order, Portfolio, Position, Trade
 
 
 class TradingError(ValueError):
@@ -34,6 +34,10 @@ def get_or_create_portfolio(db: Session, initial_cash: float) -> Portfolio:
         portfolio = Portfolio(cash=cash, initial_cash=cash)
         db.add(portfolio)
         db.flush()
+        db.query(Position).filter(Position.portfolio_id.is_(None)).update(
+            {"portfolio_id": portfolio.id},
+            synchronize_session=False,
+        )
         db.add(CashTransaction(portfolio_id=portfolio.id, transaction_type="DEPOSIT",
                                amount=cash, balance_after=cash))
         db.commit()
@@ -67,32 +71,37 @@ def execute_paper_order(db: Session, symbol: str, side: str, quantity: float, pr
         fill = px * (1 + slip) if side == "BUY" else px * (1 - slip)
         gross = qty * fill
         fee = gross * _d(fee_pct)
+        cash = _d(pf.cash)
 
         if side == "BUY":
             cost = gross + fee
-            if pf.cash < cost:
-                raise TradingError(f"Insufficient paper-trading cash: need {cost:.2f}, have {pf.cash:.2f}")
+            if cash < cost:
+                raise TradingError(f"Insufficient paper-trading cash: need {cost:.2f}, have {cash:.2f}")
             if pos is None:
                 pos = Position(portfolio_id=pf.id, symbol=symbol, quantity=D(0), avg_price=D(0))
                 db.add(pos)
-            new_qty = pos.quantity + qty
-            pos.avg_price = (pos.quantity * pos.avg_price + cost) / new_qty
+            position_qty = _d(pos.quantity)
+            avg_price = _d(pos.avg_price)
+            new_qty = position_qty + qty
+            pos.avg_price = (position_qty * avg_price + cost) / new_qty
             pos.quantity = new_qty
             if stop_loss is not None:
                 pos.stop_loss = _d(stop_loss)
             if take_profit is not None:
                 pos.take_profit = _d(take_profit)
-            pf.cash -= cost
+            pf.cash = cash - cost
             realized, cash_delta = D(0), -cost
         else:
-            if pos is None or pos.quantity < qty:
+            position_qty = _d(pos.quantity) if pos is not None else D(0)
+            avg_price = _d(pos.avg_price) if pos is not None else D(0)
+            if pos is None or position_qty < qty:
                 raise TradingError(f"Insufficient paper position in {symbol}")
             proceeds = gross - fee
-            realized = proceeds - pos.avg_price * qty
-            pos.quantity -= qty
+            realized = proceeds - avg_price * qty
+            pos.quantity = position_qty - qty
             if pos.quantity == 0:
                 pos.avg_price, pos.stop_loss, pos.take_profit = D(0), None, None
-            pf.cash += proceeds
+            pf.cash = cash + proceeds
             cash_delta = proceeds
 
         order = Order(portfolio_id=pf.id, client_order_id=client_order_id, symbol=symbol, side=side,
@@ -120,10 +129,12 @@ def check_exits(db: Session, prices: dict[str, float]) -> list[Order]:
         if pos.symbol not in prices:
             continue
         px = _d(prices[pos.symbol])
-        if pos.stop_loss is not None and px <= pos.stop_loss:
-            reason, exit_px = "STOP_LOSS", pos.stop_loss
-        elif pos.take_profit is not None and px >= pos.take_profit:
-            reason, exit_px = "TAKE_PROFIT", pos.take_profit
+        stop_loss = _d(pos.stop_loss) if pos.stop_loss is not None else None
+        take_profit = _d(pos.take_profit) if pos.take_profit is not None else None
+        if stop_loss is not None and px <= stop_loss:
+            reason, exit_px = "STOP_LOSS", stop_loss
+        elif take_profit is not None and px >= take_profit:
+            reason, exit_px = "TAKE_PROFIT", take_profit
         else:
             continue
         closed.append(execute_paper_order(db, pos.symbol, "SELL", pos.quantity, exit_px,
@@ -138,36 +149,41 @@ def portfolio_snapshot(db: Session, prices: dict[str, float] | None = None,
         return {"equity": 0.0, "cash": 0.0, "return_pct": 0.0, "realized_pnl": 0.0,
                 "closed_trades": 0, "win_rate_pct": None, "positions": []}
     prices = prices or {}
+    cash = _d(pf.cash)
+    initial_cash = _d(pf.initial_cash)
     positions, market_value = [], D(0)
     for p in db.query(Position).filter(Position.quantity > 0).all():
-        cur = _d(prices.get(p.symbol, p.avg_price))
-        value, cost = p.quantity * cur, p.quantity * p.avg_price
+        quantity = _d(p.quantity)
+        avg_price = _d(p.avg_price)
+        cur = _d(prices.get(p.symbol, avg_price))
+        value, cost = quantity * cur, quantity * avg_price
         pnl = value - cost
         market_value += value
         positions.append({
-            "symbol": p.symbol, "qty": float(p.quantity), "entry_price": float(p.avg_price),
+            "symbol": p.symbol, "qty": float(quantity), "entry_price": float(avg_price),
             "current_price": float(cur), "market_value": float(value),
             "unrealized_pnl": float(pnl),
             "unrealized_pnl_pct": float(pnl / cost * 100) if cost else 0.0,
-            "stop_loss": float(p.stop_loss) if p.stop_loss is not None else None,
-            "take_profit": float(p.take_profit) if p.take_profit is not None else None})
+            "stop_loss": float(_d(p.stop_loss)) if p.stop_loss is not None else None,
+            "take_profit": float(_d(p.take_profit)) if p.take_profit is not None else None})
 
-    equity = pf.cash + market_value
+    equity = cash + market_value
     trades = db.query(Trade).all()
     sells = [t for t in trades if t.side == "SELL"]
-    wins = [t.realized_pnl for t in sells if t.realized_pnl > 0]
-    losses = [t.realized_pnl for t in sells if t.realized_pnl <= 0]
+    realized_pnls = [_d(t.realized_pnl) for t in sells]
+    wins = [pnl for pnl in realized_pnls if pnl > 0]
+    losses = [pnl for pnl in realized_pnls if pnl <= 0]
     if record:
-        db.add(EquitySnapshot(portfolio_id=pf.id, equity=equity, cash=pf.cash))
+        db.add(EquitySnapshot(portfolio_id=pf.id, equity=equity, cash=cash))
         db.commit()
     return {
-        "equity": float(equity), "cash": float(pf.cash),
-        "return_pct": float((equity / pf.initial_cash - 1) * 100),
+        "equity": float(equity), "cash": float(cash),
+        "return_pct": float((equity / initial_cash - 1) * 100) if initial_cash else 0.0,
         "realized_pnl": float(sum((t.realized_pnl for t in sells), D(0))),
         "closed_trades": len(sells),
         "win_rate_pct": round(len(wins) / len(sells) * 100, 1) if sells else None,
         "profit_factor": float(sum(wins, D(0)) / abs(sum(losses, D(0)))) if losses and sum(losses, D(0)) != 0 else None,
-        "fees_paid": float(sum((t.fee or D(0) for t in trades), D(0))),
+        "fees_paid": float(sum((_d(t.fee or 0) for t in trades), D(0))),
         "best_trade": float(max(wins)) if wins else None,
         "worst_trade": float(min(losses)) if losses else None,
         "positions": positions,

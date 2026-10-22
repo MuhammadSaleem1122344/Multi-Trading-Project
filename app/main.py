@@ -1,8 +1,10 @@
-from fastapi import FastAPI, Depends, HTTPException
+from typing import Any
+
+from fastapi import FastAPI, Depends, HTTPException, Body, Query
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .database import Base, engine, get_db
+from .database import Base, engine, get_db, migrate_legacy_schema
 from .models import CashTransaction, Decision, Order, Trade
 from .schemas import AnalysisRequest, OrderRequest
 
@@ -12,11 +14,13 @@ from .agents.research_agent import ResearchAgent
 from .agents.risk_agent import RiskAgent
 from .agents.decision_agent import DecisionAgent
 
-from .services.market_data import get_live_watchlist
+from .services.market_data import get_crypto_prices, get_live_watchlist, get_market_data
+from .services.json_store import data_store
 
 
 
 Base.metadata.create_all(bind=engine)
+migrate_legacy_schema()
 
 app = FastAPI(
     title=settings.app_name,
@@ -29,9 +33,63 @@ research_agent = ResearchAgent()
 risk_agent = RiskAgent()
 decision_agent = DecisionAgent()
 
+
+def _run_analysis(request: AnalysisRequest):
+    supplied_market = request.market or {}
+    latest_market = get_market_data(request.symbol) if not supplied_market else {}
+    market = {**latest_market, **supplied_market, "symbol": request.symbol}
+    profile = getattr(request.profile, "value", request.profile)
+    asset_type = getattr(request.asset_type, "value", request.asset_type)
+    if asset_type is None:
+        asset_type = market.get("asset_type")
+    if asset_type is None and "/" in request.symbol:
+        asset_type = "crypto"
+    technical = technical_agent.analyze(market)
+    research = research_agent.analyze(market)
+    risk = risk_agent.assess(
+        market,
+        capital=request.capital,
+        risk_per_trade=request.risk_per_trade,
+        asset_type=asset_type,
+        profile=profile,
+    )
+    decision = decision_agent.decide(request.symbol, technical, research, risk)
+    return {
+        "symbol": request.symbol,
+        "technical": technical,
+        "research": research,
+        "risk": risk,
+        "decision": decision,
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok", "paper_trading": settings.paper_trading}
+
+@app.post("/api/data", status_code=201)
+def post_data(payload: Any = Body(...)):
+    try:
+        return data_store.add(payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+@app.get("/api/data")
+def list_data(limit: int = Query(100, ge=1, le=500)):
+    try:
+        records = data_store.list(limit)
+        return {"count": len(records), "items": records}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+@app.get("/api/data/{record_id}")
+def get_data(record_id: str):
+    try:
+        record = data_store.get(record_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="Data record not found")
+    return record
 
 @app.get("/api/market/watchlist")
 def market_watchlist():
@@ -52,19 +110,7 @@ def crypto_prices():
 @app.post("/api/analysis/decision")
 def analyze_decision(request: AnalysisRequest):
     try:
-        technical = technical_agent.analyze(request.market)
-        research = research_agent.analyze(request.market)
-        risk = risk_agent.analyze(request.market)
-        decision = decision_agent.decide(
-            request.symbol, technical, research, risk
-        )
-        return {
-            "symbol": request.symbol,
-            "technical": technical,
-            "research": research,
-            "risk": risk,
-            "decision": decision,
-        }
+        return _run_analysis(request)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -72,19 +118,7 @@ def analyze_decision(request: AnalysisRequest):
 @app.post("/api/agents/decision")
 def agent_decision(request: AnalysisRequest):
     try:
-        technical = technical_agent.analyze(request.market)
-        research = research_agent.analyze(request.market)
-        risk = risk_agent.analyze(request.market)
-        decision = decision_agent.decide(
-            request.symbol, technical, research, risk
-        )
-        return {
-            "symbol": request.symbol,
-            "technical": technical,
-            "research": research,
-            "risk": risk,
-            "decision": decision,
-        }
+        return _run_analysis(request)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

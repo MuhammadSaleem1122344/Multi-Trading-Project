@@ -4,6 +4,7 @@ sqlalchemy==2.0.43
 pydantic-settings==2.10.1
 python-dotenv==1.1.1
 yfinance==0.2.65
+ccxt>=4.4,<5
 pandas==2.3.2
 numpy==2.3.2
 httpx==0.28.1
